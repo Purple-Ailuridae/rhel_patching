@@ -30,15 +30,8 @@
         - name: "Verify Supported RHEL Version"
           ansible.builtin.assert:
             that:
-              - "ansible_facts['distribution_major_version'] in ['7', '8', '9']"
+              - "ansible_facts['distribution_major_version'] in ['6', '7', '8', '9']"
             msg: "RHEL version {{ ansible_facts['distribution_major_version'] }} is not supported by this workflow"
-          tags: ["validation", "pre_flight"]
-
-        - name: "Verify VMware Virtualization Platform"
-          ansible.builtin.assert:
-            that:
-              - "'VMware' in ansible_facts['virtualization_type'] or ansible_facts['system_vendor'] == 'VMware, Inc.'"
-            msg: "Server {{ inventory_hostname }} is not running on VMware infrastructure"
           tags: ["validation", "pre_flight"]
 
     - name: "Create Pre-Patch VMware Snapshot"
