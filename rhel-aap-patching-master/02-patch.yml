@@ -1,0 +1,242 @@
+---
+# RHEL Server Patching Workflow - Phase 2: Package Updates and Patching
+# This playbook applies the latest patches to servers with successful snapshots
+# Version-aware package management ensures compatibility across RHEL 7, 8, and 9
+# Designed for integration with Ansible Automation Platform (AAP)
+
+- name: "Phase 2: Apply Latest Patches to RHEL Servers"
+  hosts: all
+  gather_facts: true
+  vars:
+    # Initialize tracking lists for workflow orchestration
+    patch_success_list: "{{ patch_success_list | default([]) }}"
+    patch_failed_list: "{{ patch_failed_list | default([]) }}"
+    patch_statistics:
+      total_servers: 0
+      successful_patches: 0
+      failed_patches: 0
+      servers_with_updates: 0
+      servers_no_updates: 0
+
+  tasks:
+    - name: "Pre-Patch Validation and Environment Check"
+      block:
+        - name: "Confirm Server Has Valid Snapshot"
+          ansible.builtin.assert:
+            that:
+              - "inventory_hostname in (snapshot_success_list | default([])) or inventory_hostname in groups.get('snapshot_success_hosts',[])"
+            msg: "Server {{ inventory_hostname }} does not have a valid pre-patch snapshot"
+          tags: ["validation", "pre_patch"]
+
+        - name: "Identify Package Manager for RHEL Version"
+          ansible.builtin.set_fact:
+            package_manager: "{{ 'dnf' if (ansible_facts['distribution_major_version'] | int >= 8) else 'yum' }}"
+            is_rhel7: "{{ ansible_facts['distribution_major_version'] == '7' }}"
+            is_rhel8_plus: "{{ ansible_facts['distribution_major_version'] | int >= 8 }}"
+          tags: ["version_detection"]
+
+    - name: "Repository Metadata Refresh and Cache Update"
+      block:
+        - name: "Refresh Repository Cache - RHEL 7 (YUM)"
+          ansible.builtin.yum:
+            update_cache: true
+            cache_valid_time: 0
+          register: yum_cache_result
+          failed_when: false
+          when: is_rhel7
+          tags: ["repository_refresh", "rhel7"]
+
+        - name: "Refresh Repository Cache - RHEL 8/9 (DNF)"
+          ansible.builtin.dnf:
+            update_cache: true
+            cache_valid_time: 0
+          register: dnf_cache_result
+          failed_when: false
+          when: is_rhel8_plus
+          tags: ["repository_refresh", "rhel8_plus"]
+
+        - name: "Validate Repository Cache Refresh"
+          ansible.builtin.set_fact:
+            cache_refresh_result: "{{ yum_cache_result if is_rhel7 else dnf_cache_result }}"
+            cache_refresh_status: "{{ 'success' if not (yum_cache_result.failed | default(false) or dnf_cache_result.failed | default(false)) else 'failed' }}"
+            cache_refresh_error: "{{ yum_cache_result.msg if is_rhel7 and yum_cache_result.failed else (dnf_cache_result.msg if is_rhel8_plus and dnf_cache_result.failed else '') }}"
+          tags: ["cache_validation"]
+
+      rescue:
+        - name: "Handle Repository Refresh Failure"
+          ansible.builtin.set_fact:
+            cache_refresh_status: "failed"
+            cache_refresh_error: "Repository refresh exception: {{ 'Unhandled exception' }}"
+          tags: ["error_handling"]
+
+    - name: "Apply Latest Security and Bug Fix Patches"
+      block:
+        - name: "Apply Updates - RHEL 7 (YUM)"
+          ansible.builtin.yum:
+            name: '*'
+            state: latest
+            update_only: true
+            security: false
+            disable_gpg_check: false
+          register: yum_patch_result
+          failed_when: false
+          when: 
+            - is_rhel7
+            - cache_refresh_status == "success"
+          tags: ["patching", "rhel7"]
+
+        - name: "Apply Updates - RHEL 8/9 (DNF)"
+          ansible.builtin.dnf:
+            name: '*'
+            state: latest
+            update_only: true
+            security: false
+            disable_gpg_check: false
+          register: dnf_patch_result
+          failed_when: false
+          when: 
+            - is_rhel8_plus
+            - cache_refresh_status == "success"
+          tags: ["patching", "rhel8_plus"]
+
+        - name: "Skip Patching Due to Repository Issues"
+          ansible.builtin.set_fact:
+            patch_result:
+              failed: true
+              skipped: true
+              msg: "Patching skipped due to repository cache refresh failure"
+              changed: false
+          when: cache_refresh_status == "failed"
+          tags: ["patch_skip"]
+
+        - name: "Consolidate Patch Results"
+          ansible.builtin.set_fact:
+            patch_result: "{{ yum_patch_result if is_rhel7 else dnf_patch_result }}"
+          when: cache_refresh_status == "success"
+          tags: ["result_consolidation"]
+
+        - name: "Analyze Patch Application Results"
+          ansible.builtin.set_fact:
+            patch_status: "{{ 'success' if (not patch_result.failed and cache_refresh_status == 'success') else 'failed' }}"
+            packages_updated: "{{ patch_result.results | default([]) | length if patch_result.changed else 0 }}"
+            patch_changed: "{{ patch_result.changed | default(false) }}"
+            patch_error: "{{ patch_result.msg | default('') if patch_result.failed else '' }}"
+            patch_details: "{{ {'failed_packages': patch_result.failures | default([]), 'successful_packages': patch_result.results | default([])} if patch_result.changed and not patch_result.failed else {} }}"
+          tags: ["result_analysis"]
+
+        - name: "Extract Detailed Package Information"
+          ansible.builtin.set_fact:
+            updated_packages: "{{ patch_result.results | default([]) | map(attribute='name') | list if patch_result.changed else [] }}"
+            failed_packages: "{{ patch_result.failures | default([]) if patch_result.failed else [] }}"
+          tags: ["package_details"]
+
+      rescue:
+        - name: "Handle Patch Application Exception"
+          ansible.builtin.set_fact:
+            patch_status: "failed"
+            patch_error: "Patch application exception: {{ 'Unhandled exception' }}"
+            packages_updated: 0
+            patch_changed: false
+            patch_details: {"exception": "{{ 'Unhandled exception' }}"}
+          tags: ["error_handling"]
+
+    - name: "Process Patch Results for Workflow Orchestration"
+      block:
+        - name: "Add Host to Patch Success Group"
+          ansible.builtin.add_host:
+            name: "{{ inventory_hostname }}"
+            groups: patch_success_hosts
+            packages_updated: "{{ packages_updated }}"
+            patch_changed: "{{ patch_changed }}"
+            updated_packages: "{{ updated_packages | default([]) }}"
+            patch_timestamp: "{{ ansible_date_time.iso8601 }}"
+          when: patch_status == "success"
+          tags: ["host_management"]
+
+        - name: "Add Host to Patch Failed Group"
+          ansible.builtin.add_host:
+            name: "{{ inventory_hostname }}"
+            groups: patch_failed_hosts
+            patch_error: "{{ patch_error }}"
+            failed_packages: "{{ failed_packages | default([]) }}"
+            packages_updated: "{{ packages_updated }}"
+            patch_timestamp: "{{ ansible_date_time.iso8601 }}"
+          when: patch_status == "failed"
+          tags: ["host_management"]
+
+        - name: "Update Success Statistics"
+          ansible.builtin.set_fact:
+            patch_statistics: "{{ patch_statistics | combine({'successful_patches': patch_statistics.successful_patches + 1}) }}"
+          when: patch_status == "success"
+          delegate_to: localhost
+          run_once: true
+          tags: ["statistics"]
+
+        - name: "Update Failure Statistics"
+          ansible.builtin.set_fact:
+            patch_statistics: "{{ patch_statistics | combine({'failed_patches': patch_statistics.failed_patches + 1}) }}"
+          when: patch_status == "failed"
+          delegate_to: localhost
+          run_once: true
+          tags: ["statistics"]
+
+        - name: "Track Servers with Updates"
+          ansible.builtin.set_fact:
+            patch_statistics: "{{ patch_statistics | combine({'servers_with_updates': patch_statistics.servers_with_updates + 1}) }}"
+          when: 
+            - patch_status == "success"
+            - patch_changed
+          delegate_to: localhost
+          run_once: true
+          tags: ["statistics"]
+
+        - name: "Track Servers without Updates"
+          ansible.builtin.set_fact:
+            patch_statistics: "{{ patch_statistics | combine({'servers_no_updates': patch_statistics.servers_no_updates + 1}) }}"
+          when: 
+            - patch_status == "success"
+            - not patch_changed
+          delegate_to: localhost
+          run_once: true
+          tags: ["statistics"]
+
+- name: "Finalize Patch Phase and Prepare Workflow Data"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: "Compile Host Lists for Workflow Orchestration"
+      ansible.builtin.set_fact:
+        patch_success_list: "{{ groups['patch_success_hosts'] | default([]) }}"
+        patch_failed_list: "{{ groups['patch_failed_hosts'] | default([]) }}"
+        total_patch_targets: "{{ (groups['patch_success_hosts'] | default([])) | length + (groups['patch_failed_hosts'] | default([])) | length }}"
+      tags: ["workflow_preparation"]
+
+    - name: "Calculate Final Patch Statistics"
+      ansible.builtin.set_fact:
+        final_patch_statistics:
+          total_servers: "{{ total_patch_targets }}"
+          successful_patches: "{{ patch_success_list | length }}"
+          failed_patches: "{{ patch_failed_list | length }}"
+          success_percentage: "{{ ((patch_success_list | length) / (total_patch_targets | int) * 100) | round(2) if total_patch_targets | int > 0 else 0 }}"
+          eligible_for_reboot: "{{ patch_success_list | length }}"
+          require_snapshot_revert: "{{ patch_failed_list | length }}"
+      tags: ["statistics_finalization"]
+
+    - name: "Artifact Data for Subsequent Workflow Nodes"
+      ansible.builtin.set_stats:
+        data:
+          # Host lists for conditional workflow execution
+          patch_success_list: "{{ patch_success_list }}"
+          patch_failed_list: "{{ patch_failed_list }}"
+          # Statistical data for reporting
+          patch_phase_stats: "{{ final_patch_statistics }}"
+          # Workflow control variables
+          patch_phase_complete: true
+          patch_phase_timestamp: "{{ ansible_date_time.iso8601 }}"
+          # Conditional flags for workflow branching
+          has_patch_successes: "{{ patch_success_list | length > 0 }}"
+          has_patch_failures: "{{ patch_failed_list | length > 0 }}"
+          all_patches_successful: "{{ patch_failed_list | length == 0 }}"
+        per_host: false
+        aggregate: true
+      tags: ["workflow_artifacts"]

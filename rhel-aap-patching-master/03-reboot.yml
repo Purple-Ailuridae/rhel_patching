@@ -1,0 +1,202 @@
+---
+# RHEL Server Patching Workflow - Phase 3: System Reboot and Verification
+# This playbook reboots servers that successfully completed patching
+# Ensures applied patches are properly integrated into the running system
+# Designed for integration with Ansible Automation Platform (AAP)
+
+- name: "Phase 3: Reboot Patched RHEL Servers"
+  hosts: all
+  gather_facts: true
+  vars:
+    # Initialize tracking lists for workflow orchestration
+    reboot_success_list: "{{ reboot_success_list | default([]) }}"
+    reboot_failed_list: "{{ reboot_failed_list | default([]) }}"
+    reboot_statistics:
+      total_servers: 0
+      successful_reboots: 0
+      failed_reboots: 0
+      average_reboot_time: 0
+
+  tasks:
+  - name: "Pre-Reboot Validation and System Assessment"
+    block:
+    - name: "Confirm Server Successfully Patched"
+      ansible.builtin.assert:
+        that:
+        - "inventory_hostname in (patch_success_list | default([])) or inventory_hostname in groups.get('patch_success_hosts',[])"
+        msg: "Server {{ inventory_hostname }} was not successfully patched and should not be rebooted"
+      tags: [ "validation", "pre_reboot" ]
+
+    - name: "Capture Pre-Reboot System State"
+      ansible.builtin.set_fact:
+        pre_reboot_uptime: "{{ ansible_facts['uptime_seconds'] | default(0) }}"
+        pre_reboot_uptime_human: "{{ ansible_facts['uptime'] | default('Unknown') }}"
+        pre_reboot_kernel: "{{ ansible_facts['kernel'] }}"
+        pre_reboot_timestamp: "{{ ansible_date_time.iso8601 }}"
+        pre_reboot_load_avg: "{{ ansible_facts['loadavg']['1m'] | default(0) }}"
+      tags: [ "system_state", "pre_reboot" ]
+
+  - name: "Execute System Reboot with Comprehensive Monitoring"
+    block:
+    - name: "Record Reboot Initiation Time"
+      ansible.builtin.set_fact:
+        reboot_start_time: "{{ ansible_date_time.epoch }}"
+      tags: [ "reboot_timing" ]
+
+    - name: "Perform System Reboot"
+      ansible.builtin.reboot:
+        reboot_timeout: 900
+        connect_timeout: 30
+        pre_reboot_delay: 10
+        post_reboot_delay: 30
+        test_command: "systemctl is-system-running --quiet || true"
+        msg: "RHEL patching workflow automated reboot on {{ ansible_date_time.iso8601 }}"
+      register: reboot_result
+      failed_when: false
+      tags: [ "system_reboot" ]
+
+    - name: "Calculate Reboot Duration"
+      ansible.builtin.set_fact:
+        reboot_end_time: "{{ ansible_date_time.epoch }}"
+        reboot_duration: "{{ (ansible_date_time.epoch | int) - (reboot_start_time | int) }}"
+      when: not reboot_result.failed
+      tags: [ "reboot_timing" ]
+
+    - name: "Gather Post-Reboot System Facts"
+      ansible.builtin.setup:
+      when: not reboot_result.failed
+      tags: [ "post_reboot", "fact_gathering" ]
+
+    - name: "Capture Post-Reboot System State"
+      ansible.builtin.set_fact:
+        post_reboot_uptime: "{{ ansible_facts['uptime_seconds'] | default(0) }}"
+        post_reboot_uptime_human: "{{ ansible_facts['uptime'] | default('Unknown') }}"
+        post_reboot_kernel: "{{ ansible_facts['kernel'] }}"
+        post_reboot_timestamp: "{{ ansible_date_time.iso8601 }}"
+        post_reboot_load_avg: "{{ ansible_facts['loadavg']['1m'] | default(0) }}"
+        kernel_updated: "{{ pre_reboot_kernel != ansible_facts['kernel'] }}"
+      when: not reboot_result.failed
+      tags: [ "system_state", "post_reboot" ]
+
+    - name: "Validate Reboot Success"
+      ansible.builtin.set_fact:
+        reboot_status: "{{ 'success' if (not reboot_result.failed and post_reboot_uptime | int < 3600) else 'failed' }}"
+        reboot_error: "{{ reboot_result.msg | default('Unknown reboot error') if reboot_result.failed else '' }}"
+        reboot_validation_reason: "{{ 'Reboot completed successfully' if not reboot_result.failed and post_reboot_uptime | int < 3600 else 'Reboot validation failed: System uptime ' + (post_reboot_uptime | int | string) + ' seconds exceeds 1 hour threshold' }}"
+      tags: [ "reboot_validation" ]
+
+    - name: "Verify Critical System Services Post-Reboot"
+      ansible.builtin.service_facts:
+      when: reboot_status == "success"
+      tags: [ "service_verification" ]
+
+    - name: "Check SSH Service Availability"
+      ansible.builtin.set_fact:
+        ssh_service_running: "{{ ansible_facts['services']['sshd.service']['state'] == 'running' if 'sshd.service' in ansible_facts['services'] else false }}"
+      when:
+      - reboot_status == "success"
+      - ansible_facts['services'] is defined
+      tags: [ "service_verification" ]
+
+    rescue:
+    - name: "Handle Reboot Failure Exception"
+      ansible.builtin.set_fact:
+        reboot_status: "failed"
+        reboot_error: "Reboot exception: {{ 'Unhandled reboot exception' }}"
+        reboot_duration: "{{ (ansible_date_time.epoch | int) - (reboot_start_time | int) if reboot_start_time is defined else 0 }}"
+      tags: [ "error_handling" ]
+
+  - name: "Process Reboot Results for Workflow Orchestration"
+    block:
+    - name: "Add Host to Reboot Success Group"
+      ansible.builtin.add_host:
+        name: "{{ inventory_hostname }}"
+        groups: reboot_success_hosts
+        reboot_duration: "{{ reboot_duration | default(0) }}"
+        kernel_updated: "{{ kernel_updated | default(false) }}"
+        pre_reboot_uptime: "{{ pre_reboot_uptime }}"
+        post_reboot_uptime: "{{ post_reboot_uptime | default(0) }}"
+        reboot_timestamp: "{{ post_reboot_timestamp | default(ansible_date_time.iso8601) }}"
+      when: reboot_status == "success"
+      tags: [ "host_management" ]
+
+    - name: "Add Host to Reboot Failed Group"
+      ansible.builtin.add_host:
+        name: "{{ inventory_hostname }}"
+        groups: reboot_failed_hosts
+        reboot_error: "{{ reboot_error }}"
+        reboot_duration: "{{ reboot_duration | default(0) }}"
+        pre_reboot_uptime: "{{ pre_reboot_uptime }}"
+        reboot_timestamp: "{{ pre_reboot_timestamp }}"
+      when: reboot_status == "failed"
+      tags: [ "host_management" ]
+
+    - name: "Update Success Statistics"
+      ansible.builtin.set_fact:
+        reboot_statistics: "{{ reboot_statistics | combine({'successful_reboots': reboot_statistics.successful_reboots + 1}) }}"
+      when: reboot_status == "success"
+      delegate_to: localhost
+      run_once: true
+      tags: [ "statistics" ]
+
+    - name: "Update Failure Statistics"
+      ansible.builtin.set_fact:
+        reboot_statistics: "{{ reboot_statistics | combine({'failed_reboots': reboot_statistics.failed_reboots + 1}) }}"
+      when: reboot_status == "failed"
+      delegate_to: localhost
+      run_once: true
+      tags: [ "statistics" ]
+
+    - name: "Accumulate Reboot Duration for Average Calculation"
+      ansible.builtin.set_fact:
+        total_reboot_time: "{{ (total_reboot_time | default(0) | int) + (reboot_duration | default(0) | int) }}"
+      when:
+      - reboot_status == "success"
+      - reboot_duration is defined
+      delegate_to: localhost
+      run_once: true
+      tags: [ "statistics" ]
+
+- name: "Finalize Reboot Phase and Prepare Workflow Data"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+  - name: "Compile Host Lists for Workflow Orchestration"
+    ansible.builtin.set_fact:
+      reboot_success_list: "{{ groups['reboot_success_hosts'] | default([]) }}"
+      reboot_failed_list: "{{ groups['reboot_failed_hosts'] | default([]) }}"
+      total_reboot_targets: "{{ (groups['reboot_success_hosts'] | default([])) | length + (groups['reboot_failed_hosts'] | default([])) | length }}"
+    tags: [ "workflow_preparation" ]
+
+  - name: "Calculate Final Reboot Statistics"
+    ansible.builtin.set_fact:
+      final_reboot_statistics:
+        total_servers: "{{ total_reboot_targets }}"
+        successful_reboots: "{{ reboot_success_list | length }}"
+        failed_reboots: "{{ reboot_failed_list | length }}"
+        success_percentage: "{{ ((reboot_success_list | length) / (total_reboot_targets | int) * 100) | round(2) if total_reboot_targets | int > 0 else 0 }}"
+        average_reboot_time: "{{ ((total_reboot_time | default(0) | int) / (reboot_success_list | length)) | round(1) if reboot_success_list | length > 0 else 0 }}"
+        eligible_for_health_scan: "{{ reboot_success_list | length }}"
+        require_snapshot_revert: "{{ reboot_failed_list | length }}"
+    tags: [ "statistics_finalization" ]
+
+  - name: "Artifact Data for Subsequent Workflow Nodes"
+    ansible.builtin.set_stats:
+      data:
+        # Host lists for conditional workflow execution
+        reboot_success_list: "{{ reboot_success_list }}"
+        reboot_failed_list: "{{ reboot_failed_list }}"
+        # Statistical data for reporting
+        reboot_phase_stats: "{{ final_reboot_statistics }}"
+        # Workflow control variables
+        reboot_phase_complete: true
+        reboot_phase_timestamp: "{{ ansible_date_time.iso8601 }}"
+        # Conditional flags for workflow branching
+        has_reboot_successes: "{{ reboot_success_list | length > 0 }}"
+        has_reboot_failures: "{{ reboot_failed_list | length > 0 }}"
+        all_reboots_successful: "{{ reboot_failed_list | length == 0 }}"
+        # Performance metrics
+        total_reboot_time: "{{ total_reboot_time | default(0) }}"
+      per_host: false
+      aggregate: true
+    tags: [ "workflow_artifacts" ]

@@ -1,0 +1,434 @@
+---
+# RHEL Server Patching Workflow - Phase 4: Health Check and Validation
+# This playbook performs health checks on all servers to ensure they are ready for final reporting
+# It validates system services, resource usage, and overall system health
+# Designed for integration with Ansible Automation Platform (AAP)
+
+- name: "Phase 4: Health Check for All RHEL Servers"
+  hosts: all
+  gather_facts: true
+  vars:
+    # Initialize tracking lists for workflow orchestration
+    healthy_list: "{{ healthy_list | default([]) }}"
+    need_fix_list: "{{ need_fix_list | default([]) }}"
+    unreachable_list: "{{ unreachable_list | default([]) }}"
+    health_statistics:
+      total_servers: 0
+      healthy_servers: 0
+      need_fix_servers: 0
+      unreachable_servers: 0
+
+  tasks:
+    - name: "Initial Health Assessment Setup and Validation"
+      block:
+        - name: "Initialize Server Health Profile"
+          ansible.builtin.set_fact:
+            server_health_profile:
+              hostname: "{{ inventory_hostname }}"
+              assessment_timestamp: "{{ ansible_date_time.iso8601 }}"
+              workflow_path: "unknown"
+              health_issues: []
+              health_status: "unknown"
+              reachable: true
+          tags: ["health_initialization"]
+
+        - name: "Determine Server's Workflow Path"
+          ansible.builtin.set_fact:
+            server_health_profile: "{{ server_health_profile | combine({'workflow_path': determined_path}) }}"
+          vars:
+            determined_path: >-
+              {%- if inventory_hostname in (reboot_success_list | default([])) -%}
+                complete_success
+              {%- elif inventory_hostname in (revert_success_list | default([])) -%}
+                reverted_after_failure
+              {%- elif inventory_hostname in (patch_success_list | default([])) -%}
+                patched_no_reboot
+              {%- elif inventory_hostname in (not_snapshot_list | default([])) -%}
+                no_snapshot_created
+              {%- elif inventory_hostname in (patch_failed_list | default([])) or inventory_hostname in (reboot_failed_list | default([])) -%}
+                failed_operations
+              {%- else -%}
+                unknown_path
+              {%- endif -%}
+          tags: ["workflow_analysis"]
+
+    - name: "System Resource Utilization Assessment"
+      block:
+        - name: "Collect CPU Utilization Metrics"
+          ansible.builtin.shell: |
+            top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}' | sed 's/%us,//' | sed 's/%sy,//'
+          register: cpu_usage_result
+          changed_when: false
+          failed_when: false
+          timeout: 30
+          tags: ["cpu_assessment"]
+
+        - name: "Collect Memory Utilization Metrics"
+          ansible.builtin.shell: |
+            free -m | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}'
+          register: memory_usage_result
+          changed_when: false
+          failed_when: false
+          timeout: 30
+          tags: ["memory_assessment"]
+
+        - name: "Collect Disk Utilization Metrics"
+          ansible.builtin.shell: |
+            df -h --total | grep total | awk '{print $5}' | sed 's/%//'
+          register: disk_usage_result
+          changed_when: false
+          failed_when: false
+          timeout: 30
+          tags: ["disk_assessment"]
+
+        - name: "Collect System Load Average"
+          ansible.builtin.shell: |
+            uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | sed 's/,//'
+          register: load_avg_result
+          changed_when: false
+          failed_when: false
+          timeout: 30
+          tags: ["load_assessment"]
+
+        - name: "Process Resource Utilization Data"
+          ansible.builtin.set_fact:
+            cpu_usage: "{{ cpu_usage_result.stdout | float if cpu_usage_result.stdout | default('') | regex_match('^[0-9.]+$') else -1 }}"
+            memory_usage: "{{ memory_usage_result.stdout | float if memory_usage_result.stdout | default('') | regex_match('^[0-9.]+$') else -1 }}"
+            disk_usage: "{{ disk_usage_result.stdout | float if disk_usage_result.stdout | default('') | regex_match('^[0-9]+$') else -1 }}"
+            load_average: "{{ load_avg_result.stdout | float if load_avg_result.stdout | default('') | regex_match('^[0-9.]+$') else -1 }}"
+            cpu_cores: "{{ ansible_facts['processor_vcpus'] | default(1) }}"
+          tags: ["resource_processing"]
+
+        - name: "Initialize Resource Issues List"
+          ansible.builtin.set_fact:
+            resource_issues: []
+          tags: ["threshold_evaluation"]
+
+        - name: "Check CPU Critical Threshold"
+          ansible.builtin.set_fact:
+            resource_issues: "{{ resource_issues + [cpu_critical_issue] }}"
+          vars:
+            cpu_critical_issue:
+              issue: "CPU usage {{ cpu_usage }}% exceeds critical threshold {{ cpu_thresholds.critical_threshold }}%"
+              severity: "critical"
+              when: true
+          when: 
+            - cpu_usage >= 0
+            - cpu_usage >= (cpu_thresholds.critical_threshold | default(95))
+          tags: ["threshold_evaluation"]
+
+        - name: "Check CPU Warning Threshold"
+          ansible.builtin.set_fact:
+            resource_issues: "{{ resource_issues + [cpu_warning_issue] }}"
+          vars:
+            cpu_warning_issue:
+              issue: "CPU usage {{ cpu_usage }}% exceeds warning threshold {{ cpu_thresholds.warning_threshold }}%"
+              severity: "warning"
+              when: true
+          when: 
+            - cpu_usage >= 0
+            - cpu_usage >= (cpu_thresholds.warning_threshold | default(80))
+            - cpu_usage < (cpu_thresholds.critical_threshold | default(95))
+          tags: ["threshold_evaluation"]
+
+        - name: "Check Memory Critical Threshold"
+          ansible.builtin.set_fact:
+            resource_issues: "{{ resource_issues + [memory_critical_issue] }}"
+          vars:
+            memory_critical_issue:
+              issue: "Memory usage {{ memory_usage }}% exceeds critical threshold {{ memory_thresholds.critical_threshold }}%"
+              severity: "critical"
+              when: true
+          when: 
+            - memory_usage >= 0
+            - memory_usage >= (memory_thresholds.critical_threshold | default(95))
+          tags: ["threshold_evaluation"]
+
+        - name: "Check Memory Warning Threshold"
+          ansible.builtin.set_fact:
+            resource_issues: "{{ resource_issues + [memory_warning_issue] }}"
+          vars:
+            memory_warning_issue:
+              issue: "Memory usage {{ memory_usage }}% exceeds warning threshold {{ memory_thresholds.warning_threshold }}%"
+              severity: "warning"
+              when: true
+          when: 
+            - memory_usage >= 0
+            - memory_usage >= (memory_thresholds.warning_threshold | default(85))
+            - memory_usage < (memory_thresholds.critical_threshold | default(95))
+          tags: ["threshold_evaluation"]
+
+        - name: "Check Disk Critical Threshold"
+          ansible.builtin.set_fact:
+            resource_issues: "{{ resource_issues + [disk_critical_issue] }}"
+          vars:
+            disk_critical_issue:
+              issue: "Disk usage {{ disk_usage }}% exceeds critical threshold {{ disk_thresholds.critical_threshold }}%"
+              severity: "critical"
+              when: true
+          when: 
+            - disk_usage >= 0
+            - disk_usage >= (disk_thresholds.critical_threshold | default(95))
+          tags: ["threshold_evaluation"]
+
+        - name: "Check System Load Critical Threshold"
+          ansible.builtin.set_fact:
+            resource_issues: "{{ resource_issues + [load_critical_issue] }}"
+          vars:
+            load_critical_issue:
+              issue: "System load {{ load_average }} exceeds critical threshold ({{ load_thresholds.critical_multiplier | default(4.0) }} * {{ cpu_cores }} cores)"
+              severity: "critical"
+              when: true
+          when: 
+            - load_average >= 0
+            - load_average > (cpu_cores * (load_thresholds.critical_multiplier | default(4.0)))
+          tags: ["threshold_evaluation"]
+
+      rescue:
+        - name: "Handle Resource Collection Failure"
+          ansible.builtin.set_fact:
+            resource_issues:
+              - issue: "Failed to collect system resource metrics"
+                severity: "critical"
+                when: true
+          tags: ["resource_error_handling"]
+
+    - name: "Critical System Services Assessment"
+      block:
+        - name: "Gather Comprehensive Service Facts"
+          ansible.builtin.service_facts:
+          timeout: 30
+          tags: ["service_discovery"]
+
+        - name: "Initialize Service Issues List"
+          ansible.builtin.set_fact:
+            service_issues: []
+          tags: ["service_evaluation"]
+
+        - name: "Check Critical Services Status"
+          ansible.builtin.set_fact:
+            service_issues: "{{ service_issues + [service_issue] }}"
+          vars:
+            service_issue:
+              issue: "Critical service {{ item.name }} is {{ ansible_facts['services'][item.service_key]['state'] | default('not found') }}, expected {{ item.required_state }}"
+              severity: "critical"
+              when: true
+          loop: "{{ critical_services | default([]) }}"
+          when: 
+            - ansible_facts['services'] is defined
+            - item.service_key in ansible_facts['services']
+            - ansible_facts['services'][item.service_key]['state'] != item.required_state
+          tags: ["service_evaluation"]
+
+        - name: "Check for Missing Critical Services"
+          ansible.builtin.set_fact:
+            service_issues: "{{ service_issues + [missing_service_issue] }}"
+          vars:
+            missing_service_issue:
+              issue: "Critical service {{ item.name }} not found on system"
+              severity: "critical"
+              when: true
+          loop: "{{ critical_services | default([]) }}"
+          when: 
+            - ansible_facts['services'] is defined
+            - item.service_key not in ansible_facts['services']
+            - not (item.get('optional', false))
+          tags: ["service_evaluation"]
+
+        - name: "Initialize Application Service Issues List"
+          ansible.builtin.set_fact:
+            application_service_issues: []
+          tags: ["application_service_evaluation"]
+
+        - name: "Check Application Services Status"
+          ansible.builtin.set_fact:
+            application_service_issues: "{{ application_service_issues + [app_service_issue] }}"
+          vars:
+            app_service_issue:
+              issue: "Application service {{ item.name }} is {{ ansible_facts['services'][item.service_key]['state'] | default('not found') }}, expected {{ item.required_state }}"
+              severity: "warning"
+              when: true
+          loop: "{{ application_services | default([]) }}"
+          when: 
+            - ansible_facts['services'] is defined
+            - item.service_key in ansible_facts['services']
+            - ansible_facts['services'][item.service_key]['state'] != item.required_state
+            - not (item.get('optional', true))
+          tags: ["application_service_evaluation"]
+
+      rescue:
+        - name: "Handle Service Assessment Failure"
+          ansible.builtin.set_fact:
+            service_issues:
+              - issue: "Failed to assess system services status"
+                severity: "critical"
+                when: true
+            application_service_issues: []
+          tags: ["service_error_handling"]
+
+    - name: "File System and Storage Health Assessment"
+      block:
+        - name: "Check Required Mount Points"
+          ansible.builtin.shell: |
+            for mount in / /var /tmp; do
+              if ! mountpoint -q "$mount"; then
+                echo "MISSING:$mount"
+              fi
+            done
+          register: mount_check_result
+          changed_when: false
+          failed_when: false
+          tags: ["filesystem_assessment"]
+
+        - name: "Initialize Filesystem Issues List"
+          ansible.builtin.set_fact:
+            filesystem_issues: []
+          tags: ["filesystem_evaluation"]
+
+        - name: "Process Missing Mount Points"
+          ansible.builtin.set_fact:
+            filesystem_issues: "{{ filesystem_issues + [mount_issue] }}"
+          vars:
+            mount_issue:
+              issue: "Required mount point {{ item.split(':')[1] }} is not available"
+              severity: "critical"
+              when: true
+          loop: "{{ mount_check_result.stdout_lines | default([]) }}"
+          when: item.startswith('MISSING:')
+          tags: ["filesystem_evaluation"]
+
+      rescue:
+        - name: "Handle File System Assessment Failure"
+          ansible.builtin.set_fact:
+            filesystem_issues:
+              - issue: "Failed to assess file system health"
+                severity: "warning"
+                when: true
+          tags: ["filesystem_error_handling"]
+
+    - name: "Consolidate Health Assessment Results"
+      block:
+        - name: "Aggregate All Health Issues"
+          ansible.builtin.set_fact:
+            all_health_issues: "{{ (resource_issues | default([])) + (service_issues | default([])) + (application_service_issues | default([])) + (filesystem_issues | default([])) }}"
+          tags: ["issue_aggregation"]
+
+        - name: "Filter Active Health Issues"
+          ansible.builtin.set_fact:
+            active_health_issues: "{{ all_health_issues | selectattr('when', 'equalto', true) | list }}"
+          tags: ["issue_filtering"]
+
+        - name: "Determine Overall Health Status"
+          ansible.builtin.set_fact:
+            has_critical_issues: "{{ active_health_issues | selectattr('severity', 'equalto', 'critical') | list | length > 0 }}"
+            has_warning_issues: "{{ active_health_issues | selectattr('severity', 'equalto', 'warning') | list | length > 0 }}"
+          tags: ["health_determination"]
+
+        - name: "Finalize Server Health Assessment"
+          ansible.builtin.set_fact:
+            server_health_profile: "{{ server_health_profile | combine(health_update) }}"
+          vars:
+            health_update:
+              health_issues: "{{ active_health_issues }}"
+              health_status: "{{ 'needs_fix' if has_critical_issues else ('warning' if has_warning_issues else 'healthy') }}"
+              cpu_usage: "{{ cpu_usage | default(-1) }}"
+              memory_usage: "{{ memory_usage | default(-1) }}"
+              disk_usage: "{{ disk_usage | default(-1) }}"
+              load_average: "{{ load_average | default(-1) }}"
+              critical_issues_count: "{{ active_health_issues | selectattr('severity', 'equalto', 'critical') | list | length }}"
+              warning_issues_count: "{{ active_health_issues | selectattr('severity', 'equalto', 'warning') | list | length }}"
+          tags: ["health_finalization"]
+
+    - name: "Process Health Assessment for Workflow Orchestration"
+      block:
+        - name: "Add Host to Healthy Group"
+          ansible.builtin.add_host:
+            name: "{{ inventory_hostname }}"
+            groups: healthy_hosts
+            health_profile: "{{ server_health_profile }}"
+          when: server_health_profile.health_status == "healthy"
+          tags: ["host_management"]
+
+        - name: "Add Host to Need Fix Group"
+          ansible.builtin.add_host:
+            name: "{{ inventory_hostname }}"
+            groups: need_fix_hosts
+            health_profile: "{{ server_health_profile }}"
+          when: server_health_profile.health_status == "needs_fix"
+          tags: ["host_management"]
+
+        - name: "Add Host to Warning Group"
+          ansible.builtin.add_host:
+            name: "{{ inventory_hostname }}"
+            groups: warning_hosts
+            health_profile: "{{ server_health_profile }}"
+          when: server_health_profile.health_status == "warning"
+          tags: ["host_management"]
+
+        - name: "Add Host to Unreachable Group"
+          ansible.builtin.add_host:
+            name: "{{ inventory_hostname }}"
+            groups: unreachable_hosts
+            health_profile: "{{ server_health_profile }}"
+          when: not server_health_profile.reachable
+          tags: ["host_management"]
+
+        - name: "Update Health Statistics"
+          ansible.builtin.set_fact:
+            health_statistics: "{{ health_statistics | combine(stat_update) }}"
+          vars:
+            stat_update:
+              healthy_servers: "{{ health_statistics.healthy_servers + 1 if server_health_profile.health_status == 'healthy' else health_statistics.healthy_servers }}"
+              need_fix_servers: "{{ health_statistics.need_fix_servers + 1 if server_health_profile.health_status == 'needs_fix' else health_statistics.need_fix_servers }}"
+              unreachable_servers: "{{ health_statistics.unreachable_servers + 1 if not server_health_profile.reachable else health_statistics.unreachable_servers }}"
+          delegate_to: localhost
+          run_once: true
+          tags: ["statistics"]
+
+- name: "Finalize Health Check Phase and Prepare Workflow Data"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: "Compile Host Lists for Workflow Orchestration"
+      ansible.builtin.set_fact:
+        healthy_list: "{{ groups['healthy_hosts'] | default([]) }}"
+        need_fix_list: "{{ groups['need_fix_hosts'] | default([]) }}"
+        warning_list: "{{ groups['warning_hosts'] | default([]) }}"
+        unreachable_list: "{{ groups['unreachable_hosts'] | default([]) }}"
+        total_assessed_servers: "{{ groups['all'] | length }}"
+      tags: ["workflow_preparation"]
+
+    - name: "Calculate Final Health Statistics"
+      ansible.builtin.set_fact:
+        final_health_statistics:
+          total_servers: "{{ total_assessed_servers }}"
+          healthy_servers: "{{ healthy_list | length }}"
+          need_fix_servers: "{{ need_fix_list | length }}"
+          warning_servers: "{{ warning_list | length }}"
+          unreachable_servers: "{{ unreachable_list | length }}"
+          healthy_percentage: "{{ ((healthy_list | length) / (total_assessed_servers | int) * 100) | round(2) if total_assessed_servers | int > 0 else 0 }}"
+          need_fix_percentage: "{{ ((need_fix_list | length) / (total_assessed_servers | int) * 100) | round(2) if total_assessed_servers | int > 0 else 0 }}"
+      tags: ["statistics_finalization"]
+
+    - name: "Artifact Data for Subsequent Workflow Nodes"
+      ansible.builtin.set_stats:
+        data:
+          # Host lists for conditional workflow execution
+          healthy_list: "{{ healthy_list }}"
+          need_fix_list: "{{ need_fix_list }}"
+          warning_list: "{{ warning_list }}"
+          unreachable_list: "{{ unreachable_list }}"
+          # Statistical data for reporting
+          health_scan_stats: "{{ final_health_statistics }}"
+          # Workflow control variables
+          health_scan_complete: true
+          health_scan_timestamp: "{{ ansible_date_time.iso8601 }}"
+          # Conditional flags for workflow management
+          has_healthy_servers: "{{ healthy_list | length > 0 }}"
+          has_servers_needing_fix: "{{ need_fix_list | length > 0 }}"
+          has_unreachable_servers: "{{ unreachable_list | length > 0 }}"
+          # Completion status for final reporting
+          comprehensive_assessment_complete: true
+        per_host: false
+        aggregate: true
+      tags: ["workflow_artifacts"]

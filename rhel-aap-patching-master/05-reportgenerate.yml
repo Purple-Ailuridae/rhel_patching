@@ -1,0 +1,408 @@
+---
+# RHEL Server Patching Workflow - Phase 4: Report Generation
+# This playbook generates HTML and CSV reports for patching operations
+# Designed for integration with Ansible Automation Platform (AAP)
+
+- name: "Phase 4: Generate Comprehensive Patching Reports"
+  hosts: localhost
+  gather_facts: true
+  vars:
+    # Report generation configuration
+    report_output_directory: "{{ report_output_directory | default('/tmp/ansible_reports') }}"
+    report_filename: "rhel_patching_report_{{ ansible_date_time.iso8601_basic }}.html"
+    report_timestamp: "{{ ansible_date_time.iso8601 }}"
+
+    # Corporate branding and customization
+    corporate_name: "{{ corporate_organization_name | default('IT Operations') }}"
+    report_title: "RHEL Server Patching Execution Report"
+    
+    # Initialize comprehensive statistics
+    final_workflow_statistics:
+      execution_timestamp: "{{ ansible_date_time.iso8601 }}"
+      execution_date: "{{ ansible_date_time.date }}"
+      execution_time: "{{ ansible_date_time.time }}"
+      total_execution_duration: "Unknown"
+      workflow_completion_status: "Completed"
+  tasks:
+    - name: "Report Generation Setup and Validation"
+      block:
+        - name: "Create Report Output Directory"
+          ansible.builtin.file:
+            path: "{{ report_output_directory }}"
+            state: directory
+            mode: '0755'
+          tags: ["report_setup"]
+
+        - name: "Validate Workflow Data Availability"
+          ansible.builtin.set_fact:
+            workflow_data_available:
+              snapshot_phase: "{{ snapshot_phase_stats is defined }}"
+              patch_phase: "{{ patch_phase_stats is defined }}"
+              reboot_phase: "{{ reboot_phase_stats is defined }}"
+              revert_phase: "{{ revert_phase_stats is defined }}"
+              health_scan_phase: "{{ health_scan_stats is defined }}"
+              host_lists_available: "{{ (snapshot_success_list is defined) and (need_fix_list is defined) }}"
+          tags: ["data_validation"]
+
+    - name: "Aggregate Comprehensive Workflow Statistics"
+      block:
+        - name: "Calculate Workflow Duration"
+          ansible.builtin.set_fact:
+            workflow_start_time: "{{ snapshot_phase_timestamp | default(ansible_date_time.iso8601) }}"
+            workflow_end_time: "{{ health_scan_timestamp | default(ansible_date_time.iso8601) }}"
+          tags: ["duration_calculation"]
+
+        - name: "Compute Execution Duration"
+          ansible.builtin.set_fact:
+            execution_duration_seconds: "{{ ((workflow_end_time | to_datetime) - (workflow_start_time | to_datetime)).total_seconds() | int }}"
+          when: 
+            - workflow_start_time is defined
+            - workflow_end_time is defined
+          failed_when: false
+          tags: ["duration_calculation"]
+
+        - name: "Format Execution Duration"
+          ansible.builtin.set_fact:
+            formatted_duration: "{{ (execution_duration_seconds | int // 3600) }}h {{ ((execution_duration_seconds | int % 3600) // 60) }}m {{ (execution_duration_seconds | int % 60) }}s"
+          when: execution_duration_seconds is defined
+          tags: ["duration_formatting"]
+
+        - name: "Compile Final Workflow Statistics"
+          ansible.builtin.set_fact:
+            final_workflow_statistics: "{{ final_workflow_statistics | combine(comprehensive_stats) }}"
+          vars:
+            comprehensive_stats:
+              total_execution_duration: "{{ formatted_duration | default('Unknown') }}"
+              workflow_start_timestamp: "{{ workflow_start_time }}"
+              workflow_end_timestamp: "{{ workflow_end_time }}"
+              phases_executed:
+                snapshot: "{{ snapshot_phase_complete | default(false) }}"
+                patch: "{{ patch_phase_complete | default(false) }}"
+                reboot: "{{ reboot_phase_complete | default(false) }}"
+                revert: "{{ revert_phase_complete | default(false) }}"
+                health_scan: "{{ health_scan_complete | default(false) }}"
+              overall_success_metrics:
+                total_servers_processed: "{{ snapshot_phase_stats.total_servers | default(0) }}"
+                final_healthy_servers: "{{ health_scan_stats.healthy_servers | default(0) }}"
+                servers_requiring_intervention: "{{ health_scan_stats.need_fix_servers | default(0) }}"
+                overall_success_rate: "{{ health_scan_stats.healthy_percentage | default(0) }}"
+                critical_failures: "{{ (revert_failed_list | default([])) | length }}"
+          tags: ["statistics_compilation"]
+
+        - name: "Generate Additional Report Metadata"
+          ansible.builtin.set_fact:
+            report_metadata:
+              report_filename: "{{ report_filename }}"
+              report_full_path: "{{ report_output_directory }}/{{ report_filename }}"
+              generation_timestamp: "{{ ansible_date_time.iso8601 }}"
+              generated_by_user: "{{ ansible_user_id | default('ansible-automation') }}"
+              generated_by_host: "{{ ansible_hostname }}"
+              workflow_execution_id: "{{ workflow_job_id | default(ansible_date_time.epoch) }}"
+              ansible_version: "{{ ansible_version.full }}"
+              report_format: "HTML"
+              report_size_estimate: "Large (Detailed)"
+          tags: ["metadata_generation"]
+
+    - name: "Prepare Template Variables for Report Generation"
+      block:
+        - name: "Consolidate All Host Groups for Template"
+          ansible.builtin.set_fact:
+            template_host_groups:
+              all_servers: "{{ groups['all'] | default([]) }}"
+              snapshot_success: "{{ snapshot_success_list | default([]) }}"
+              not_snapshot: "{{ not_snapshot_list | default([]) }}"
+              patch_success: "{{ patch_success_list | default([]) }}"
+              patch_failed: "{{ patch_failed_list | default([]) }}"
+              reboot_success: "{{ reboot_success_list | default([]) }}"
+              reboot_failed: "{{ reboot_failed_list | default([]) }}"
+              revert_success: "{{ revert_success_list | default([]) }}"
+              revert_failed: "{{ revert_failed_list | default([]) }}"
+              healthy_servers: "{{ healthy_list | default([]) }}"
+              need_fix_servers: "{{ need_fix_list | default([]) }}"
+              warning_servers: "{{ warning_list | default([]) }}"
+              unreachable_servers: "{{ unreachable_list | default([]) }}"
+          tags: ["template_preparation"]
+
+        - name: "Prepare Template Variables"
+          ansible.builtin.set_fact:
+            report_template_vars:
+              # Report metadata
+              report_date: "{{ ansible_date_time.date }}"
+              report_time: "{{ ansible_date_time.time }}"
+              workflow_duration: "{{ formatted_duration | default('Unknown') }}"
+              workflow_execution_id: "{{ report_metadata.workflow_execution_id }}"
+              
+              # Corporate information
+              corporate_name: "{{ corporate_name }}"
+              
+              # Phase statistics (ensuring all phases have data even if not executed)
+              snapshot_phase_stats: "{{ snapshot_phase_stats | default({'total_servers': 0, 'successful_snapshots': 0, 'failed_snapshots': 0, 'success_percentage': 0}) }}"
+              patch_phase_stats: "{{ patch_phase_stats | default({'total_servers': 0, 'successful_patches': 0, 'failed_patches': 0, 'success_percentage': 0}) }}"
+              reboot_phase_stats: "{{ reboot_phase_stats | default({'total_servers': 0, 'successful_reboots': 0, 'failed_reboots': 0, 'success_percentage': 0, 'average_reboot_time': 0}) }}"
+              revert_phase_stats: "{{ revert_phase_stats | default({'total_servers': 0, 'successful_reverts': 0, 'failed_reverts': 0, 'success_percentage': 0}) if revert_phase_complete | default(false) else None }}"
+              health_scan_stats: "{{ health_scan_stats | default({'total_servers': 0, 'healthy_servers': 0, 'need_fix_servers': 0, 'healthy_percentage': 0, 'need_fix_percentage': 0}) }}"
+              
+              # Host lists for template iteration
+              snapshot_success_list: "{{ template_host_groups.snapshot_success }}"
+              not_snapshot_list: "{{ template_host_groups.not_snapshot }}"
+              patch_success_list: "{{ template_host_groups.patch_success }}"
+              patch_failed_list: "{{ template_host_groups.patch_failed }}"
+              reboot_success_list: "{{ template_host_groups.reboot_success }}"
+              reboot_failed_list: "{{ template_host_groups.reboot_failed }}"
+              revert_success_list: "{{ template_host_groups.revert_success }}"
+              revert_failed_list: "{{ template_host_groups.revert_failed }}"
+              healthy_list: "{{ template_host_groups.healthy_servers }}"
+              need_fix_list: "{{ template_host_groups.need_fix_servers }}"
+              warning_list: "{{ template_host_groups.warning_servers }}"
+              unreachable_list: "{{ template_host_groups.unreachable_servers }}"
+          tags: ["template_variables"]
+
+    - name: "Generate Comprehensive HTML Report"
+      block:
+        - name: "Create HTML Report from Template"
+          ansible.builtin.template:
+            src: templates/patch-report.html.j2
+            dest: "{{ report_metadata.report_full_path }}"
+            mode: '0644'
+            backup: false
+          vars:
+            - "{{ report_template_vars }}"
+          register: html_report_result
+          tags: ["html_generation"]
+
+        - name: "Verify Report Generation Success"
+          ansible.builtin.stat:
+            path: "{{ report_metadata.report_full_path }}"
+          register: report_file_stat
+          tags: ["report_verification"]
+
+        - name: "Calculate Report File Size"
+          ansible.builtin.set_fact:
+            report_file_size_bytes: "{{ report_file_stat.stat.size | default(0) }}"
+            report_file_size_kb: "{{ (report_file_stat.stat.size | default(0) / 1024) | round(1) }}"
+          when: report_file_stat.stat.exists
+          tags: ["file_metrics"]
+
+    - name: "Generate Executive Summary for Quick Reference"
+      block:
+        - name: "Create Executive Summary Text File"
+          ansible.builtin.copy:
+            content: |
+              RHEL PATCHING WORKFLOW EXECUTIVE SUMMARY
+              ========================================
+              
+              Execution Date: {{ final_workflow_statistics.execution_date }}
+              Execution Time: {{ final_workflow_statistics.execution_time }}
+              Total Duration: {{ final_workflow_statistics.total_execution_duration }}
+              
+              OVERALL RESULTS:
+              - Total Servers Processed: {{ final_workflow_statistics.overall_success_metrics.total_servers_processed }}
+              - Healthy Servers: {{ final_workflow_statistics.overall_success_metrics.final_healthy_servers }}
+              - Servers Requiring Intervention: {{ final_workflow_statistics.overall_success_metrics.servers_requiring_intervention }}
+              - Overall Success Rate: {{ final_workflow_statistics.overall_success_metrics.overall_success_rate }}%
+              
+              PHASE BREAKDOWN:
+              - Snapshot Success Rate: {{ snapshot_phase_stats.success_percentage | default(0) }}%
+              - Patch Success Rate: {{ patch_phase_stats.success_percentage | default(0) }}%
+              - Reboot Success Rate: {{ reboot_phase_stats.success_percentage | default(0) }}%
+              {% if revert_phase_stats is defined %}
+              - Recovery Success Rate: {{ revert_phase_stats.success_percentage }}%
+              {% endif %}
+              
+              {% if final_workflow_statistics.overall_success_metrics.servers_requiring_intervention > 0 %}
+              IMMEDIATE ACTION REQUIRED:
+              {{ final_workflow_statistics.overall_success_metrics.servers_requiring_intervention }} servers require manual intervention.
+              See detailed HTML report for specific issues and recommended actions.
+              {% endif %}
+              
+              {% if final_workflow_statistics.overall_success_metrics.critical_failures > 0 %}
+              CRITICAL ALERT:
+              {{ final_workflow_statistics.overall_success_metrics.critical_failures }} servers experienced critical failures requiring immediate attention.
+              {% endif %}
+              
+              Report Generated: {{ ansible_date_time.iso8601 }}
+              Detailed Report: {{ report_metadata.report_full_path }}
+            dest: "{{ report_output_directory }}/executive_summary_{{ ansible_date_time.iso8601_basic }}.txt"
+            mode: '0644'
+          register: summary_result
+          tags: ["executive_summary"]
+
+    - name: "Upload Reports to GitLab Repository"
+      block:
+        - name: "Read HTML Report Content"
+          ansible.builtin.slurp:
+            src: "{{ report_metadata.report_full_path }}"
+          register: html_report_content
+          when: report_file_stat.stat.exists
+          tags: ["gitlab_upload"]
+
+        - name: "Read Executive Summary Content"
+          ansible.builtin.slurp:
+            src: "{{ summary_result.dest }}"
+          register: summary_content
+          when: summary_result.dest is defined
+          tags: ["gitlab_upload"]
+
+        - name: "Generate Need-Fix CSV Report"
+          ansible.builtin.template:
+            src: templates/need-fix.csv.j2
+            dest: "{{ report_output_directory }}/need_fix_servers_{{ ansible_date_time.iso8601_basic }}.csv"
+            mode: '0644'
+          vars:
+            - "{{ report_template_vars }}"
+          register: csv_report_result
+          when: template_host_groups.need_fix_servers | length > 0
+          tags: ["gitlab_upload"]
+
+        - name: "Read CSV Report Content"
+          ansible.builtin.slurp:
+            src: "{{ csv_report_result.dest }}"
+          register: csv_report_content
+          when: 
+            - csv_report_result.dest is defined
+            - template_host_groups.need_fix_servers | length > 0
+          tags: ["gitlab_upload"]
+
+        - name: "Create GitLab Repository Path Structure"
+          ansible.builtin.set_fact:
+            gitlab_report_path: "patching-reports/{{ ansible_date_time.date }}"
+            commit_message: "RHEL Patching Report - {{ ansible_date_time.date }} {{ ansible_date_time.time }}"
+          tags: ["gitlab_upload"]
+
+        - name: "Upload HTML Report to GitLab"
+          ansible.builtin.uri:
+            url: "{{ gitlab_base_url }}/api/v4/projects/{{ gitlab_project_id }}/repository/files/{{ gitlab_report_path }}%2F{{ report_filename | urlencode }}"
+            method: POST
+            headers:
+              PRIVATE-TOKEN: "{{ gitlab_api_token }}"
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              branch: "{{ gitlab_branch | default('main') }}"
+              content: "{{ html_report_content.content }}"
+              commit_message: "{{ commit_message }} - HTML Report"
+              encoding: "base64"
+            status_code: [201, 400]
+          register: gitlab_html_upload
+          when: 
+            - html_report_content is defined
+            - gitlab_project_id is defined
+            - gitlab_api_token is defined
+          failed_when: false
+          tags: ["gitlab_upload"]
+
+        - name: "Upload Executive Summary to GitLab"
+          ansible.builtin.uri:
+            url: "{{ gitlab_base_url }}/api/v4/projects/{{ gitlab_project_id }}/repository/files/{{ gitlab_report_path }}%2Fexecutive_summary_{{ ansible_date_time.iso8601_basic }}.txt"
+            method: POST
+            headers:
+              PRIVATE-TOKEN: "{{ gitlab_api_token }}"
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              branch: "{{ gitlab_branch | default('main') }}"
+              content: "{{ summary_content.content }}"
+              commit_message: "{{ commit_message }} - Executive Summary"
+              encoding: "base64"
+            status_code: [201, 400]
+          register: gitlab_summary_upload
+          when: 
+            - summary_content is defined
+            - gitlab_project_id is defined
+            - gitlab_api_token is defined
+          failed_when: false
+          tags: ["gitlab_upload"]
+
+        - name: "Upload Need-Fix CSV to GitLab"
+          ansible.builtin.uri:
+            url: "{{ gitlab_base_url }}/api/v4/projects/{{ gitlab_project_id }}/repository/files/{{ gitlab_report_path }}%2Fneed_fix_servers_{{ ansible_date_time.iso8601_basic }}.csv"
+            method: POST
+            headers:
+              PRIVATE-TOKEN: "{{ gitlab_api_token }}"
+              Content-Type: "application/json"
+            body_format: json
+            body:
+              branch: "{{ gitlab_branch | default('main') }}"
+              content: "{{ csv_report_content.content }}"
+              commit_message: "{{ commit_message }} - Need Fix CSV"
+              encoding: "base64"
+            status_code: [201, 400]
+          register: gitlab_csv_upload
+          when: 
+            - csv_report_content is defined
+            - gitlab_project_id is defined
+            - gitlab_api_token is defined
+          failed_when: false
+          tags: ["gitlab_upload"]
+
+        - name: "Generate GitLab Report URLs"
+          ansible.builtin.set_fact:
+            gitlab_report_urls:
+              html_report: "{{ gitlab_base_url }}/{{ gitlab_project_path | default(gitlab_project_id) }}/-/blob/{{ gitlab_branch | default('main') }}/{{ gitlab_report_path }}/{{ report_filename }}"
+              executive_summary: "{{ gitlab_base_url }}/{{ gitlab_project_path | default(gitlab_project_id) }}/-/blob/{{ gitlab_branch | default('main') }}/{{ gitlab_report_path }}/executive_summary_{{ ansible_date_time.iso8601_basic }}.txt"
+              need_fix_csv: "{{ gitlab_base_url }}/{{ gitlab_project_path | default(gitlab_project_id) }}/-/blob/{{ gitlab_branch | default('main') }}/{{ gitlab_report_path }}/need_fix_servers_{{ ansible_date_time.iso8601_basic }}.csv"
+          when: gitlab_project_id is defined
+          tags: ["gitlab_upload"]
+
+        - name: "Update Final Report Statistics with GitLab URLs"
+          ansible.builtin.set_fact:
+            final_report_statistics: "{{ final_report_statistics | combine(gitlab_stats) }}"
+          vars:
+            gitlab_stats:
+              gitlab_upload_successful: "{{ (gitlab_html_upload.status | default(0)) == 201 }}"
+              gitlab_html_url: "{{ gitlab_report_urls.html_report | default('Not uploaded') }}"
+              gitlab_summary_url: "{{ gitlab_report_urls.executive_summary | default('Not uploaded') }}"
+              gitlab_csv_url: "{{ gitlab_report_urls.need_fix_csv | default('Not uploaded') }}"
+              gitlab_upload_timestamp: "{{ ansible_date_time.iso8601 }}"
+          when: gitlab_report_urls is defined
+          tags: ["gitlab_upload"]
+
+      rescue:
+        - name: "Handle GitLab Upload Failure"
+          ansible.builtin.set_fact:
+            final_report_statistics: "{{ final_report_statistics | combine({'gitlab_upload_successful': false, 'gitlab_error': 'GitLab upload failed'}) }}"
+          tags: ["gitlab_error_handling"]
+
+    - name: "Finalize Report Generation and Prepare Workflow Data"
+      block:
+        - name: "Compile Final Report Statistics"
+          ansible.builtin.set_fact:
+            final_report_statistics:
+              report_generation_successful: "{{ true }}"
+              html_report_path: "{{ report_metadata.report_full_path }}"
+              html_report_size_kb: "{{ report_file_size_kb | default(0) }}"
+              executive_summary_path: "{{ summary_result.dest if summary_result.dest is defined else 'Not Generated' }}"
+              total_servers_documented: "{{ final_workflow_statistics.overall_success_metrics.total_servers_processed }}"
+              documentation_timestamp: "{{ ansible_date_time.iso8601 }}"
+              reports_ready_for_distribution: "{{ report_file_stat.stat.exists | default(false) }}"
+          tags: ["final_statistics"]
+
+        - name: "Artifact Data for Workflow Completion"
+          ansible.builtin.set_stats:
+            data:
+              # Report file locations and metadata
+              html_report_path: "{{ final_report_statistics.html_report_path }}"
+              executive_summary_path: "{{ final_report_statistics.executive_summary_path }}"
+              report_generation_stats: "{{ final_report_statistics }}"
+              
+              # Comprehensive workflow summary for GitLab push
+              final_workflow_summary: "{{ final_workflow_statistics }}"
+              
+              # Host lists and statistics for GitLab CSV generation
+              need_fix_hosts_for_gitlab: "{{ template_host_groups.need_fix_servers }}"
+              all_workflow_host_lists: "{{ template_host_groups }}"
+              
+              # Phase completion status
+              report_generation_complete: true
+              report_generation_timestamp: "{{ ansible_date_time.iso8601 }}"
+              
+              # Conditional flags for final workflow steps
+              reports_ready_for_gitlab: "{{ final_report_statistics.reports_ready_for_distribution }}"
+              has_servers_needing_gitlab_notification: "{{ template_host_groups.need_fix_servers | length > 0 }}"
+              
+              # Workflow completion indicators
+              comprehensive_documentation_complete: true
+              ready_for_gitlab_integration: true
+            per_host: false
+            aggregate: true
+          tags: ["workflow_artifacts"]

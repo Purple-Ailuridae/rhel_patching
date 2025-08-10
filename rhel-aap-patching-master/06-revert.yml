@@ -1,0 +1,278 @@
+---
+# RHEL Server Patching Workflow - Phase 6: Snapshot Revert and Recovery
+# This playbook reverts failed servers to their pre-patch snapshot state
+# Provides recovery mechanism for servers that experienced patching or reboot failures
+# Designed for integration with Ansible Automation Platform (AAP)
+
+- name: "Phase 6: Revert Failed Servers to Pre-Patch Snapshots"
+  hosts: all
+  gather_facts: true
+  vars:
+    # Initialize tracking lists for workflow orchestration
+    revert_success_list: "{{ revert_success_list | default([]) }}"
+    revert_failed_list: "{{ revert_failed_list | default([]) }}"
+    revert_statistics:
+      total_servers: 0
+      successful_reverts: 0
+      failed_reverts: 0
+      skipped_reverts: 0
+
+  tasks:
+    - name: "Pre-Revert Validation and Assessment"
+      block:
+        - name: "Confirm Server Requires Revert Operation"
+          ansible.builtin.assert:
+            that:
+              - >
+                inventory_hostname in (patch_failed_list | default([])) or
+                inventory_hostname in (reboot_failed_list | default([])) or
+                inventory_hostname in (critical_failure_list | default([]))
+            msg: "Server {{ inventory_hostname }} does not require snapshot revert operation"
+          tags: ["validation", "pre_revert"]
+
+        - name: "Verify Server Has Pre-Patch Snapshot"
+          ansible.builtin.assert:
+            that:
+              - "inventory_hostname in (snapshot_success_list | default([])) or inventory_hostname in groups.get('snapshot_success_hosts',[])"
+            msg: "Server {{ inventory_hostname }} does not have a valid pre-patch snapshot available for revert"
+          tags: ["validation", "snapshot_verification"]
+
+        - name: "Determine Failure Type and Revert Strategy"
+          ansible.builtin.set_fact:
+            failure_type: >-
+              {%- if inventory_hostname in (patch_failed_list | default([])) -%}
+                patch_failure
+              {%- elif inventory_hostname in (reboot_failed_list | default([])) -%}
+                reboot_failure
+              {%- elif inventory_hostname in (critical_failure_list | default([])) -%}
+                critical_failure
+              {%- else -%}
+                unknown_failure
+              {%- endif -%}
+            revert_reason: >-
+              {%- if inventory_hostname in (patch_failed_list | default([])) -%}
+                Failed during patch application phase
+              {%- elif inventory_hostname in (reboot_failed_list | default([])) -%}
+                Failed during system reboot phase
+              {%- elif inventory_hostname in (critical_failure_list | default([])) -%}
+                Critical system failure detected
+              {%- else -%}
+                Unknown failure condition
+              {%- endif -%}
+          tags: ["failure_analysis"]
+
+        - name: "Retrieve Snapshot Information"
+          ansible.builtin.set_fact:
+            snapshot_name: "{{ hostvars[inventory_hostname].get('snapshot_name', 'patch_pre_' + ansible_date_time.iso8601_basic) }}"
+            snapshot_timestamp: "{{ hostvars[inventory_hostname].get('snapshot_timestamp', ansible_date_time.iso8601) }}"
+          tags: ["snapshot_info"]
+
+    - name: "Execute Snapshot Revert Operation"
+      block:
+        - name: "Record Revert Initiation Time"
+          ansible.builtin.set_fact:
+            revert_start_time: "{{ ansible_date_time.epoch }}"
+            revert_start_timestamp: "{{ ansible_date_time.iso8601 }}"
+          tags: ["revert_timing"]
+
+        - name: "Perform VMware Snapshot Revert"
+          vmware.vmware.vm_snapshot:
+            hostname: "{{ vcenter_hostname }}"
+            username: "{{ vcenter_username }}"
+            password: "{{ vcenter_password }}"
+            validate_certs: false
+            name: "{{ inventory_hostname }}"
+            state: revert
+            snapshot_name: "{{ snapshot_name }}"
+          register: revert_result
+          failed_when: false
+          timeout: 1800  # 30 minutes timeout for revert operation
+          tags: ["snapshot_revert"]
+
+        - name: "Calculate Revert Duration"
+          ansible.builtin.set_fact:
+            revert_end_time: "{{ ansible_date_time.epoch }}"
+            revert_duration: "{{ (ansible_date_time.epoch | int) - (revert_start_time | int) }}"
+            revert_end_timestamp: "{{ ansible_date_time.iso8601 }}"
+          when: not revert_result.failed
+          tags: ["revert_timing"]
+
+        - name: "Validate Revert Operation Success"
+          ansible.builtin.set_fact:
+            revert_status: "{{ 'success' if (revert_result.changed and not revert_result.failed) else 'failed' }}"
+            revert_error: "{{ revert_result.msg | default('Unknown revert error') if revert_result.failed else '' }}"
+            revert_validation_reason: "{{ 'Snapshot revert completed successfully' if revert_result.changed and not revert_result.failed else 'Snapshot revert operation failed: ' + (revert_result.msg | default('Unknown error')) }}"
+          tags: ["revert_validation"]
+
+        - name: "Wait for System Recovery After Revert"
+          ansible.builtin.wait_for_connection:
+            connect_timeout: 60
+            sleep: 30
+            delay: 60
+            timeout: 900
+          register: recovery_result
+          failed_when: false
+          when: revert_status == "success"
+          tags: ["system_recovery"]
+
+        - name: "Verify System Accessibility Post-Revert"
+          ansible.builtin.ping:
+          register: ping_result
+          failed_when: false
+          when: 
+            - revert_status == "success"
+            - recovery_result is not failed
+          tags: ["connectivity_verification"]
+
+        - name: "Update Revert Status Based on Recovery"
+          ansible.builtin.set_fact:
+            revert_status: "{{ 'failed' if (recovery_result.failed | default(false)) or (ping_result.failed | default(false)) else revert_status }}"
+            revert_error: "{{ 'System not accessible after snapshot revert' if (recovery_result.failed | default(false)) or (ping_result.failed | default(false)) else revert_error }}"
+          when: revert_status == "success"
+          tags: ["recovery_validation"]
+
+      rescue:
+        - name: "Handle Revert Operation Exception"
+          ansible.builtin.set_fact:
+            revert_status: "failed"
+            revert_error: "Revert operation exception: {{ ansible_failed_result.msg | default('Unhandled revert exception') }}"
+            revert_duration: "{{ (ansible_date_time.epoch | int) - (revert_start_time | int) if revert_start_time is defined else 0 }}"
+          tags: ["error_handling"]
+
+    - name: "Post-Revert System State Assessment"
+      block:
+        - name: "Gather Post-Revert System Facts"
+          ansible.builtin.setup:
+          when: revert_status == "success"
+          tags: ["post_revert_facts"]
+
+        - name: "Capture Post-Revert System State"
+          ansible.builtin.set_fact:
+            post_revert_uptime: "{{ ansible_facts['uptime_seconds'] | default(0) }}"
+            post_revert_kernel: "{{ ansible_facts['kernel'] | default('Unknown') }}"
+            post_revert_timestamp: "{{ ansible_date_time.iso8601 }}"
+            system_recovered: "{{ revert_status == 'success' and (ansible_facts['uptime_seconds'] | default(0) | int < 3600) }}"
+          when: revert_status == "success"
+          tags: ["post_revert_assessment"]
+
+        - name: "Validate Snapshot Revert Effectiveness"
+          ansible.builtin.set_fact:
+            revert_effective: "{{ system_recovered | default(false) }}"
+            revert_validation_details:
+              system_uptime_seconds: "{{ post_revert_uptime | default(0) }}"
+              system_accessible: "{{ not (ping_result.failed | default(true)) }}"
+              recovery_duration: "{{ revert_duration | default(0) }}"
+              failure_type_resolved: "{{ failure_type }}"
+          when: revert_status == "success"
+          tags: ["effectiveness_validation"]
+
+      rescue:
+        - name: "Handle Post-Revert Assessment Failure"
+          ansible.builtin.set_fact:
+            revert_effective: false
+            revert_validation_details:
+              assessment_failed: true
+              error: "Post-revert assessment failed"
+          tags: ["assessment_error_handling"]
+
+    - name: "Process Revert Results for Workflow Orchestration"
+      block:
+        - name: "Add Host to Revert Success Group"
+          ansible.builtin.add_host:
+            name: "{{ inventory_hostname }}"
+            groups: revert_success_hosts
+            revert_duration: "{{ revert_duration | default(0) }}"
+            failure_type: "{{ failure_type }}"
+            revert_reason: "{{ revert_reason }}"
+            snapshot_name: "{{ snapshot_name }}"
+            revert_timestamp: "{{ revert_end_timestamp | default(revert_start_timestamp) }}"
+            system_recovered: "{{ revert_effective | default(false) }}"
+          when: revert_status == "success"
+          tags: ["host_management"]
+
+        - name: "Add Host to Revert Failed Group"
+          ansible.builtin.add_host:
+            name: "{{ inventory_hostname }}"
+            groups: revert_failed_hosts
+            revert_error: "{{ revert_error }}"
+            revert_duration: "{{ revert_duration | default(0) }}"
+            failure_type: "{{ failure_type }}"
+            revert_reason: "{{ revert_reason }}"
+            snapshot_name: "{{ snapshot_name }}"
+            revert_timestamp: "{{ revert_start_timestamp }}"
+            critical_intervention_required: true
+          when: revert_status == "failed"
+          tags: ["host_management"]
+
+        - name: "Update Success Statistics"
+          ansible.builtin.set_fact:
+            revert_statistics: "{{ revert_statistics | combine({'successful_reverts': revert_statistics.successful_reverts + 1}) }}"
+          when: revert_status == "success"
+          delegate_to: localhost
+          run_once: true
+          tags: ["statistics"]
+
+        - name: "Update Failure Statistics"
+          ansible.builtin.set_fact:
+            revert_statistics: "{{ revert_statistics | combine({'failed_reverts': revert_statistics.failed_reverts + 1}) }}"
+          when: revert_status == "failed"
+          delegate_to: localhost
+          run_once: true
+          tags: ["statistics"]
+
+        - name: "Accumulate Revert Duration for Average Calculation"
+          ansible.builtin.set_fact:
+            total_revert_time: "{{ (total_revert_time | default(0) | int) + (revert_duration | default(0) | int) }}"
+          when: 
+            - revert_status == "success"
+            - revert_duration is defined
+          delegate_to: localhost
+          run_once: true
+          tags: ["statistics"]
+
+- name: "Finalize Revert Phase and Prepare Workflow Data"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: "Compile Host Lists for Workflow Orchestration"
+      ansible.builtin.set_fact:
+        revert_success_list: "{{ groups['revert_success_hosts'] | default([]) }}"
+        revert_failed_list: "{{ groups['revert_failed_hosts'] | default([]) }}"
+        total_revert_targets: "{{ (groups['revert_success_hosts'] | default([])) | length + (groups['revert_failed_hosts'] | default([])) | length }}"
+      tags: ["workflow_preparation"]
+
+    - name: "Calculate Final Revert Statistics"
+      ansible.builtin.set_fact:
+        final_revert_statistics:
+          total_servers: "{{ total_revert_targets }}"
+          successful_reverts: "{{ revert_success_list | length }}"
+          failed_reverts: "{{ revert_failed_list | length }}"
+          success_percentage: "{{ ((revert_success_list | length) / (total_revert_targets | int) * 100) | round(2) if total_revert_targets | int > 0 else 0 }}"
+          average_revert_time: "{{ ((total_revert_time | default(0) | int) / (revert_success_list | length)) | round(1) if revert_success_list | length > 0 else 0 }}"
+          critical_intervention_required: "{{ revert_failed_list | length }}"
+          systems_recovered: "{{ revert_success_list | length }}"
+      tags: ["statistics_finalization"]
+
+    - name: "Artifact Data for Subsequent Workflow Nodes"
+      ansible.builtin.set_stats:
+        data:
+          # Host lists for conditional workflow execution
+          revert_success_list: "{{ revert_success_list }}"
+          revert_failed_list: "{{ revert_failed_list }}"
+          # Statistical data for reporting
+          revert_phase_stats: "{{ final_revert_statistics }}"
+          # Workflow control variables
+          revert_phase_complete: true
+          revert_phase_timestamp: "{{ ansible_date_time.iso8601 }}"
+          # Conditional flags for workflow branching
+          has_revert_successes: "{{ revert_success_list | length > 0 }}"
+          has_revert_failures: "{{ revert_failed_list | length > 0 }}"
+          all_reverts_successful: "{{ revert_failed_list | length == 0 }}"
+          # Critical alerts for immediate attention
+          critical_servers_requiring_intervention: "{{ revert_failed_list | length }}"
+          systems_successfully_recovered: "{{ revert_success_list | length }}"
+          # Performance metrics
+          total_revert_time: "{{ total_revert_time | default(0) }}"
+        per_host: false
+        aggregate: true
+      tags: ["workflow_artifacts"]

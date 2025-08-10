@@ -1,0 +1,155 @@
+---
+# RHEL Server Patching Workflow - Phase 1: VMware Snapshot Creation
+# This playbook creates pre-patch snapshots for all targeted RHEL servers
+# Snapshots serve as rollback points for failed patching operations
+# Designed for integration with Ansible Automation Platform (AAP)
+
+- name: "Phase 1: Create VMware Snapshots for RHEL Servers"
+  hosts: all
+  gather_facts: true
+  vars:
+    # Initialize tracking lists for workflow orchestration
+    snapshot_success_list: "{{ snapshot_success_list | default([]) }}"
+    not_snapshot_list: "{{ not_snapshot_list | default([]) }}"
+    snapshot_statistics:
+      total_servers: 0
+      successful_snapshots: 0
+      failed_snapshots: 0
+      skipped_snapshots: 0
+
+  tasks:
+    - name: "Validate Target Environment"
+      block:
+        - name: "Verify RHEL Operating System"
+          ansible.builtin.assert:
+            that:
+              - "ansible_facts['distribution'] == 'RedHat'"
+            msg: "Server {{ inventory_hostname }} is not running Red Hat Enterprise Linux"
+          tags: ["validation", "pre_flight"]
+
+        - name: "Verify Supported RHEL Version"
+          ansible.builtin.assert:
+            that:
+              - "ansible_facts['distribution_major_version'] in ['7', '8', '9']"
+            msg: "RHEL version {{ ansible_facts['distribution_major_version'] }} is not supported by this workflow"
+          tags: ["validation", "pre_flight"]
+
+        - name: "Verify VMware Virtualization Platform"
+          ansible.builtin.assert:
+            that:
+              - "'VMware' in ansible_facts['virtualization_type'] or ansible_facts['system_vendor'] == 'VMware, Inc.'"
+            msg: "Server {{ inventory_hostname }} is not running on VMware infrastructure"
+          tags: ["validation", "pre_flight"]
+
+    - name: "Create Pre-Patch VMware Snapshot"
+      block:
+        - name: "Generate Unique Snapshot Name"
+          ansible.builtin.set_fact:
+            snapshot_name: "patch_pre_{{ ansible_date_time.iso8601_basic }}"
+            snapshot_description: "Pre-patch snapshot for RHEL update on {{ ansible_date_time.iso8601 }}"
+          tags: ["snapshot_preparation"]
+
+        - name: "Create VMware Snapshot"
+          vmware.vmware.vm_snapshot:
+              hostname: "{{ vcenter_hostname }}"
+              username: "{{ vcenter_username }}"
+              password: "{{ vcenter_password }}"
+              validate_certs: false
+              name: "{{ inventory_hostname }}"
+              state: present
+              snapshot_name: "{{ snapshot_name }}"
+              description: "{{ snapshot_description }}"
+              memory_dump: true
+              quiesce: true
+          register: snapshot_result
+          failed_when: false
+          tags: ["snapshot_creation"]
+
+        - name: "Validate Snapshot Creation Success"
+          ansible.builtin.set_fact:
+            snapshot_status: "{{ 'success' if (snapshot_result.changed and not snapshot_result.failed) else 'failed' }}"
+            snapshot_error: "{{ snapshot_result.msg | default('Unknown error') if snapshot_result.failed else '' }}"
+          tags: ["snapshot_validation"]
+
+      rescue:
+        - name: "Handle Snapshot Creation Failure"
+          ansible.builtin.set_fact:
+            snapshot_status: "failed"
+            snapshot_error: "Exception during snapshot creation: {{ snapshot_result.msg | default('Unhandled exception') }}"
+          tags: ["error_handling"]
+
+    - name: "Process Snapshot Results for Workflow Orchestration"
+      block:
+        - name: "Add Host to Success Group"
+          ansible.builtin.add_host:
+            name: "{{ inventory_hostname }}"
+            groups: snapshot_success_hosts
+            snapshot_name: "{{ snapshot_name }}"
+            snapshot_timestamp: "{{ ansible_date_time.iso8601 }}"
+          when: snapshot_status == "success"
+          tags: ["host_management"]
+
+        - name: "Add Host to Failed Group"
+          ansible.builtin.add_host:
+            name: "{{ inventory_hostname }}"
+            groups: not_snapshot_hosts
+            snapshot_error: "{{ snapshot_error }}"
+            snapshot_timestamp: "{{ ansible_date_time.iso8601 }}"
+          when: snapshot_status == "failed"
+          tags: ["host_management"]
+
+        - name: "Update Success Statistics"
+          ansible.builtin.set_fact:
+            snapshot_statistics: "{{ snapshot_statistics | combine({'successful_snapshots': snapshot_statistics.successful_snapshots + 1}) }}"
+          when: snapshot_status == "success"
+          delegate_to: localhost
+          run_once: true
+          tags: ["statistics"]
+
+        - name: "Update Failure Statistics"
+          ansible.builtin.set_fact:
+            snapshot_statistics: "{{ snapshot_statistics | combine({'failed_snapshots': snapshot_statistics.failed_snapshots + 1}) }}"
+          when: snapshot_status == "failed"
+          delegate_to: localhost
+          run_once: true
+          tags: ["statistics"]
+
+- name: "Finalize Snapshot Phase and Prepare Workflow Data"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: "Compile Host Lists for Workflow Orchestration"
+      ansible.builtin.set_fact:
+        snapshot_success_list: "{{ groups['snapshot_success_hosts'] | default([]) }}"
+        not_snapshot_list: "{{ groups['not_snapshot_hosts'] | default([]) }}"
+        total_servers_processed: "{{ groups['all'] | length }}"
+      tags: ["workflow_preparation"]
+
+    - name: "Calculate Final Statistics"
+      ansible.builtin.set_fact:
+        final_snapshot_statistics:
+          total_servers: "{{ total_servers_processed }}"
+          successful_snapshots: "{{ snapshot_success_list | length }}"
+          failed_snapshots: "{{ not_snapshot_list | length }}"
+          success_percentage: "{{ ((snapshot_success_list | length) / (total_servers_processed | int) * 100) | round(2) if total_servers_processed | int > 0 else 0 }}"
+          eligible_for_patching: "{{ snapshot_success_list | length }}"
+      tags: ["statistics_finalization"]
+
+    - name: "Artifact Data for Subsequent Workflow Nodes"
+      ansible.builtin.set_stats:
+        data:
+          # Host lists for conditional workflow execution
+          snapshot_success_list: "{{ snapshot_success_list }}"
+          not_snapshot_list: "{{ not_snapshot_list }}"
+          # Statistical data for reporting
+          snapshot_phase_stats: "{{ final_snapshot_statistics }}"
+          # Workflow control variables
+          snapshot_phase_complete: true
+          snapshot_phase_timestamp: "{{ ansible_date_time.iso8601 }}"
+          # Conditional flags for workflow branching
+          has_snapshot_successes: "{{ snapshot_success_list | length > 0 }}"
+          has_snapshot_failures: "{{ not_snapshot_list | length > 0 }}"
+          all_snapshots_successful: "{{ not_snapshot_list | length == 0 }}"
+        per_host: false
+        aggregate: true
+      tags: ["workflow_artifacts"]

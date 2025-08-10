@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RHEL Server Patching Report - {{ report_date | default(ansible_date_time.date) }}</title>
+    <style>
+        /* Corporate styling and responsive design */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f8f9fa;
+            margin: 0;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            box-shadow: 0 0 20px rgba(0,0,0,0.1);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            font-weight: 300;
+        }
+        
+        .header .subtitle {
+            font-size: 1.2em;
+            opacity: 0.9;
+            margin-bottom: 20px;
+        }
+        
+        .header .metadata {
+            display: flex;
+            justify-content: space-around;
+            flex-wrap: wrap;
+            margin-top: 20px;
+            font-size: 0.95em;
+        }
+        
+        .metadata-item {
+            margin: 5px;
+        }
+        
+        .content {
+            padding: 40px;
+        }
+        
+        .executive-summary {
+            background: #e8f4fd;
+            border-left: 5px solid #2a5298;
+            padding: 25px;
+            margin-bottom: 40px;
+            border-radius: 0 8px 8px 0;
+        }
+        
+        .executive-summary h2 {
+            color: #1e3c72;
+            margin-bottom: 15px;
+            font-size: 1.8em;
+        }
+        
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        
+        .summary-card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            border-top: 4px solid #2a5298;
+        }
+        
+        .summary-card h3 {
+            color: #1e3c72;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+        
+        .summary-card .number {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #2a5298;
+            line-height: 1;
+        }
+        
+        .summary-card .percentage {
+            font-size: 1.2em;
+            color: #666;
+            margin-top: 5px;
+        }
+        
+        .status-success { color: #28a745; }
+        .status-warning { color: #ffc107; }
+        .status-danger { color: #dc3545; }
+        .status-info { color: #17a2b8; }
+        
+        .section {
+            margin: 40px 0;
+        }
+        
+        .section h2 {
+            color: #1e3c72;
+            font-size: 1.8em;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 3px solid #e9ecef;
+        }
+        
+        .phase-summary {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 25px;
+            margin: 20px 0;
+        }
+        
+        .phase-title {
+            font-size: 1.4em;
+            font-weight: bold;
+            color: #1e3c72;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+        }
+        
+        .phase-icon {
+            width: 24px;
+            height: 24px;
+            margin-right: 10px;
+            border-radius: 50%;
+        }
+        
+        .icon-success { background-color: #28a745; }
+        .icon-warning { background-color: #ffc107; }
+        .icon-danger { background-color: #dc3545; }
+        .icon-info { background-color: #17a2b8; }
+        
+        .phase-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        
+        .stat-item {
+            background: white;
+            padding: 15px;
+            border-radius: 6px;
+            border-left: 4px solid #2a5298;
+        }
+        
+        .stat-label {
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        
+        .stat-value {
+            font-size: 1.4em;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .server-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .server-table th,
+        .server-table td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid #dee2e6;
+        }
+        
+        .server-table th {
+            background: #1e3c72;
+            color: white;
+            font-weight: 600;
+            font-size: 0.95em;
+        }
+        
+        .server-table tr:hover {
+            background-color: #f8f9fa;
+        }
+        
+        .server-table tr:last-child td {
+            border-bottom: none;
+        }
+        
+        .status-badge {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .badge-success {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        
+        .badge-warning {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+        
+        .badge-danger {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        
+        .badge-info {
+            background-color: #cce7ff;
+            color: #004085;
+        }
+        
+        .badge-secondary {
+            background-color: #e2e3e5;
+            color: #383d41;
+        }
+        
+        .workflow-path {
+            font-size: 0.85em;
+            background: #e9ecef;
+            padding: 3px 8px;
+            border-radius: 12px;
+            color: #495057;
+        }
+        
+        .issues-list {
+            background: #fff5f5;
+            border: 1px solid #fed7d7;
+            border-radius: 6px;
+            padding: 15px;
+            margin: 20px 0;
+        }
+        
+        .issues-list h3 {
+            color: #c53030;
+            margin-bottom: 10px;
+        }
+        
+        .issue-item {
+            padding: 8px 0;
+            border-bottom: 1px solid #fed7d7;
+        }
+        
+        .issue-item:last-child {
+            border-bottom: none;
+        }
+        
+        .issue-severity {
+            font-weight: bold;
+            margin-right: 10px;
+        }
+        
+        .severity-critical { color: #c53030; }
+        .severity-warning { color: #d69e2e; }
+        
+        .footer {
+            background: #343a40;
+            color: white;
+            padding: 30px;
+            text-align: center;
+            font-size: 0.9em;
+        }
+        
+        .footer a {
+            color: #adb5bd;
+            text-decoration: none;
+        }
+        
+        @media (max-width: 768px) {
+            .header .metadata {
+                flex-direction: column;
+                align-items: center;
+            }
+            
+            .summary-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .phase-stats {
+                grid-template-columns: 1fr;
+            }
+            
+            .server-table {
+                font-size: 0.9em;
+            }
+            
+            .server-table th,
+            .server-table td {
+                padding: 8px 10px;
+            }
+        }
+        
+        @media print {
+            body {
+                background: white;
+                padding: 0;
+            }
+            
+            .container {
+                box-shadow: none;
+                border-radius: 0;
+            }
+            
+            .header {
+                background: #1e3c72 !important;
+                -webkit-print-color-adjust: exact;
+                color-adjust: exact;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Report Header -->
+        <div class="header">
+            <h1>RHEL Server Patching Report</h1>
+            <div class="subtitle">Automated Patching Workflow Execution Summary</div>
+            <div class="metadata">
+                <div class="metadata-item"><strong>Execution Date:</strong> {{ report_date | default(ansible_date_time.date) }}</div>
+                <div class="metadata-item"><strong>Execution Time:</strong> {{ report_time | default(ansible_date_time.time) }}</div>
+                <div class="metadata-item"><strong>Total Servers:</strong> {{ (snapshot_phase_stats.total_servers | default(0)) | int }}</div>
+                <div class="metadata-item"><strong>Workflow Duration:</strong> {{ workflow_duration | default('Unknown') }}</div>
+                <div class="metadata-item"><strong>Generated By:</strong> Red Hat Ansible Automation Platform</div>
+            </div>
+        </div>
+
+        <div class="content">
+            <!-- Executive Summary -->
+            <div class="executive-summary">
+                <h2>Executive Summary</h2>
+                <p>This report provides a comprehensive overview of the automated RHEL server patching operation executed on {{ report_date | default(ansible_date_time.date) }}. The workflow processed {{ (snapshot_phase_stats.total_servers | default(0)) | int }} servers through a systematic approach including snapshot creation, patch application, system reboots, and health verification.</p>
+                
+                <div class="summary-grid">
+                    <div class="summary-card">
+                        <h3>Total Servers Processed</h3>
+                        <div class="number">{{ (snapshot_phase_stats.total_servers | default(0)) | int }}</div>
+                    </div>
+                    <div class="summary-card">
+                        <h3>Successfully Completed</h3>
+                        <div class="number status-success">{{ (health_scan_stats.healthy_servers | default(0)) | int }}</div>
+                        <div class="percentage">{{ (health_scan_stats.healthy_percentage | default(0)) | round(1) }}% of total</div>
+                    </div>
+                    <div class="summary-card">
+                        <h3>Require Manual Intervention</h3>
+                        <div class="number status-danger">{{ (health_scan_stats.need_fix_servers | default(0)) | int }}</div>
+                        <div class="percentage">{{ (health_scan_stats.need_fix_percentage | default(0)) | round(1) }}% of total</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2>Detailed Phase Statistics</h2>
+                
+                <div class="phase-summary">
+                    <div class="phase-title">
+                        <span class="phase-icon icon-success"></span>
+                        Snapshot Phase
+                    </div>
+                    <div class="phase-stats">
+                        <div class="stat-item">
+                            <div class="stat-label">Total Servers</div>
+                            <div class="stat-value">{{ (snapshot_phase_stats.total_servers | default(0)) | int }}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Successful Snapshots</div>
+                            <div class="stat-value status-success">{{ (snapshot_phase_stats.successful_snapshots | default(0)) | int }}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Failed Snapshots</div>
+                            <div class="stat-value status-danger">{{ (snapshot_phase_stats.failed_snapshots | default(0)) | int }}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Success Rate</div>
+                            <div class="stat-value">{{ (snapshot_phase_stats.success_percentage | default(0)) | round(1) }}%</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="phase-summary">
+                    <div class="phase-title">
+                        <span class="phase-icon icon-info"></span>
+                        Patching Phase
+                    </div>
+                    <div class="phase-stats">
+                        <div class="stat-item">
+                            <div class="stat-label">Total Servers</div>
+                            <div class="stat-value">{{ (patch_phase_stats.total_servers | default(0)) | int }}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Successful Patches</div>
+                            <div class="stat-value status-success">{{ (patch_phase_stats.successful_patches | default(0)) | int }}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Failed Patches</div>
+                            <div class="stat-value status-danger">{{ (patch_phase_stats.failed_patches | default(0)) | int }}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Success Rate</div>
+                            <div class="stat-value">{{ (patch_phase_stats.success_percentage | default(0)) | round(1) }}%</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="phase-summary">
+                    <div class="phase-title">
+                        <span class="phase-icon icon-warning"></span>
+                        Reboot Phase
+                    </div>
+                    <div class="phase-stats">
+                        <div class="stat-item">
+                            <div class="stat-label">Total Servers</div>
+                            <div class="stat-value">{{ (reboot_phase_stats.total_servers | default(0)) | int }}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Successful Reboots</div>
+                            <div class="stat-value status-success">{{ (reboot_phase_stats.successful_reboots | default(0)) | int }}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Failed Reboots</div>
+                            <div class="stat-value status-danger">{{ (reboot_phase_stats.failed_reboots | default(0)) | int }}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Success Rate</div>
+                            <div class="stat-value">{{ (reboot_phase_stats.success_percentage | default(0)) | round(1) }}%</div>
+                        </div>
+                    </div>
+                </div>
+
+                {% if revert_phase_stats is defined %}
+                <div class="phase-summary">
+                    <div class="phase-title">
+                        <span class="phase-icon icon-danger"></span>
+                        Recovery Phase
+                    </div>
+                    <div class="phase-stats">
+                        <div class="stat-item">
+                            <div class="stat-label">Total Reverts</div>
+                            <div class="stat-value">{{ (revert_phase_stats.total_servers | default(0)) | int }}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Successful Reverts</div>
+                            <div class="stat-value status-success">{{ (revert_phase_stats.successful_reverts | default(0)) | int }}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Failed Reverts</div>
+                            <div class="stat-value status-danger">{{ (revert_phase_stats.failed_reverts | default(0)) | int }}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Success Rate</div>
+                            <div class="stat-value">{{ (revert_phase_stats.success_percentage | default(0)) | round(1) }}%</div>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+                
+                <div class="section">
+                    <h2>Server Health Status</h2>
+                    
+                    <div class="phase-summary">
+                        <div class="phase-title">
+                            <span class="phase-icon icon-success"></span>
+                            Healthy Servers
+                        </div>
+                        <div class="phase-stats">
+                            <div class="stat-item">
+                                <div class="stat-label">Total Healthy</div>
+                                <div class="stat-value status-success">{{ (health_scan_stats.healthy_servers | default(0)) | int }}</div>
+                            </div>
+                            <div class="stat-item">
+                                <div class="stat-label">Servers Needing Fix</div>
+                                <div class="stat-value status-danger">{{ (health_scan_stats.need_fix_servers | default(0)) | int }}</div>
+                            </div>
+                            <div class="stat-item">
+                                <div class="stat-label">Healthy Percentage</div>
+                                <div class="stat-value">{{ (health_scan_stats.healthy_percentage | default(0)) | round(1) }}%</div>
+                            </div>
+                            <div class="stat-item">
+                                <div class="stat-label">Need Fix Percentage</div>
+                                <div class="stat-value">{{ (health_scan_stats.need_fix_percentage | default(0)) | round(1) }}%</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="section">
+                    <h2>Server Details</h2>
+                    
+                    {% if healthy_list | length > 0 %}
+                    <h3>Healthy Servers</h3>
+                    <table class="server-table">
+                        <thead>
+                            <tr>
+                                <th>Server Name</th>
+                                <th>IP Address</th>
+                                <th>OS Version</th>
+                                <th>Status</th>
+                                <th>Workflow Path</th>
+                                <th>CPU Usage</th>
+                                <th>Memory Usage</th>
+                                <th>Disk Usage</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for host in healthy_list %}
+                            <tr>
+                                <td>{{ host }}</td>
+                                <td>{{ hostvars[host].get('ansible_host', 'Unknown') }}</td>
+                                <td>{{ hostvars[host].get('ansible_distribution', 'Unknown') }} {{ hostvars[host].get('ansible_distribution_version', 'Unknown') }}</td>
+                                <td><span class="status-badge badge-success">Healthy</span></td>
+                                <td><span class="workflow-path">{% if host in (reboot_success_list | default([])) %}Complete Success{% elif host in (revert_success_list | default([])) %}Reverted After Failure{% elif host in (patch_success_list | default([])) %}Patched No Reboot{% elif host in (not_snapshot_list | default([])) %}No Snapshot Created{% elif host in (patch_failed_list | default([])) or host in (reboot_failed_list | default([])) %}Failed Operations{% else %}Unknown Path{% endif %}</span></td>
+                                <td>{% if hostvars[host].get('health_profile', {}).get('cpu_usage', -1) >= 0 %}{{ hostvars[host].health_profile.cpu_usage }}%{% else %}Unknown{% endif %}</td>
+                                <td>{% if hostvars[host].get('health_profile', {}).get('memory_usage', -1) >= 0 %}{{ hostvars[host].health_profile.memory_usage }}%{% else %}Unknown{% endif %}</td>
+                                <td>{% if hostvars[host].get('health_profile', {}).get('disk_usage', -1) >= 0 %}{{ hostvars[host].health_profile.disk_usage }}%{% else %}Unknown{% endif %}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                    {% endif %}
+
+                    {% if need_fix_list | length > 0 %}
+                    <h3>Servers Requiring Intervention</h3>
+                    <table class="server-table">
+                        <thead>
+                            <tr>
+                                <th>Server Name</th>
+                                <th>IP Address</th>
+                                <th>OS Version</th>
+                                <th>Status</th>
+                                <th>Workflow Path</th>
+                                <th>Critical Issues</th>
+                                <th>Warning Issues</th>
+                                <th>Action Required</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for host in need_fix_list %}
+                            <tr>
+                                <td>{{ host }}</td>
+                                <td>{{ hostvars[host].get('ansible_host', 'Unknown') }}</td>
+                                <td>{{ hostvars[host].get('ansible_distribution', 'Unknown') }} {{ hostvars[host].get('ansible_distribution_version', 'Unknown') }}</td>
+                                <td><span class="status-badge badge-danger">Needs Fix</span></td>
+                                <td><span class="workflow-path">{% if host in (reboot_success_list | default([])) %}Complete Success{% elif host in (revert_success_list | default([])) %}Reverted After Failure{% elif host in (patch_success_list | default([])) %}Patched No Reboot{% elif host in (not_snapshot_list | default([])) %}No Snapshot Created{% elif host in (patch_failed_list | default([])) or host in (reboot_failed_list | default([])) %}Failed Operations{% else %}Unknown Path{% endif %}</span></td>
+                                <td>{{ hostvars[host].get('health_profile', {}).get('health_issues', []) | selectattr('severity', 'equalto', 'critical') | list | length }}</td>
+                                <td>{{ hostvars[host].get('health_profile', {}).get('health_issues', []) | selectattr('severity', 'equalto', 'warning') | list | length }}</td>
+                                <td>Manual Investigation Required</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                    {% endif %}
+
+                    {% if warning_list | length > 0 %}
+                    <h3>Servers with Warnings</h3>
+                    <table class="server-table">
+                        <thead>
+                            <tr>
+                                <th>Server Name</th>
+                                <th>IP Address</th>
+                                <th>OS Version</th>
+                                <th>Status</th>
+                                <th>Workflow Path</th>
+                                <th>Warning Issues</th>
+                                <th>Action Required</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for host in warning_list %}
+                            <tr>
+                                <td>{{ host }}</td>
+                                <td>{{ hostvars[host].get('ansible_host', 'Unknown') }}</td>
+                                <td>{{ hostvars[host].get('ansible_distribution', 'Unknown') }} {{ hostvars[host].get('ansible_distribution_version', 'Unknown') }}</td>
+                                <td><span class="status-badge badge-warning">Warning</span></td>
+                                <td><span class="workflow-path">{% if host in (reboot_success_list | default([])) %}Complete Success{% elif host in (revert_success_list | default([])) %}Reverted After Failure{% elif host in (patch_success_list | default([])) %}Patched No Reboot{% elif host in (not_snapshot_list | default([])) %}No Snapshot Created{% elif host in (patch_failed_list | default([])) or host in (reboot_failed_list | default([])) %}Failed Operations{% else %}Unknown Path{% endif %}</span></td>
+                                <td>{{ hostvars[host].get('health_profile', {}).get('health_issues', []) | selectattr('severity', 'equalto', 'warning') | list | length }}</td>
+                                <td>Monitor and Schedule Review</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p>RHEL Server Patching Report - Generated on {{ ansible_date_time.iso8601 }}</p>
+            <p>Report ID: {{ workflow_execution_id | default('N/A') }}</p>
+        </div>
+    </div>
+</body>
+</html>
